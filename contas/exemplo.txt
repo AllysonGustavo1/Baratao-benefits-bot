@@ -1,0 +1,4 @@
+BARATAO_authorization=
+baratao=
+cookie=
+baratao_roleta_cookie=
