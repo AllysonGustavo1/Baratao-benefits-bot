@@ -6,7 +6,9 @@ const zlib = require("zlib");
 const CHECKIN_URL = "https://barataocombustiveis.com.br/api/v1/grava_checkin";
 const ROLETA_URL = "https://barataocombustiveis.com.br/api/v1/roleta";
 const ACCOUNTS_DIR = path.join(__dirname, "contas");
-const CYCLE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const BRAZIL_TIME_ZONE = "America/Sao_Paulo";
+const TARGET_HOUR_BRT = 2;
+const SCHEDULER_TICK_MS = 30 * 1000;
 const BETWEEN_REQUESTS_DELAY_MS = 10 * 1000;
 const BETWEEN_ACCOUNTS_DELAY_MS = 10 * 1000;
 
@@ -26,6 +28,51 @@ function decodeResponseBody(buffer, encoding) {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getBrazilDateParts(date = new Date()) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: BRAZIL_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+
+  const parts = formatter.formatToParts(date);
+  const mapped = Object.fromEntries(
+    parts
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+
+  return {
+    dateKey: `${mapped.year}-${mapped.month}-${mapped.day}`,
+    hour: Number(mapped.hour),
+    minute: Number(mapped.minute),
+    second: Number(mapped.second),
+  };
+}
+
+function getNextRunDescription(now = new Date()) {
+  const nowParts = getBrazilDateParts(now);
+  const nowUtc = Date.now();
+  const secondsSinceMidnight =
+    nowParts.hour * 3600 + nowParts.minute * 60 + nowParts.second;
+  const targetSeconds = TARGET_HOUR_BRT * 3600;
+  const secondsUntilTargetToday = targetSeconds - secondsSinceMidnight;
+  const secondsUntilRun =
+    secondsUntilTargetToday > 0
+      ? secondsUntilTargetToday
+      : secondsUntilTargetToday + 24 * 3600;
+  const nextRunDate = new Date(nowUtc + secondsUntilRun * 1000);
+
+  return `${nextRunDate.toISOString()} (${TARGET_HOUR_BRT
+    .toString()
+    .padStart(2, "0")}:00 ${BRAZIL_TIME_ZONE})`;
 }
 
 function parseAccountFile(fileName, fileContent) {
@@ -310,29 +357,46 @@ async function runAllAccounts(accounts) {
 }
 
 async function startScheduler() {
-  console.log(`[${new Date().toISOString()}] Agendador iniciado.`);
+  console.log(
+    `[${new Date().toISOString()}] Agendador iniciado. Execucao diaria as ${TARGET_HOUR_BRT
+      .toString()
+      .padStart(2, "0")}:00 (${BRAZIL_TIME_ZONE}).`,
+  );
+  console.log(
+    `[${new Date().toISOString()}] Proxima execucao prevista: ${getNextRunDescription()}.`,
+  );
+
+  let lastRunDateKey = null;
 
   while (true) {
-    const cycleStartedAt = new Date().toISOString();
-    const accounts = loadAccounts();
+    const now = new Date();
+    const nowParts = getBrazilDateParts(now);
+    const shouldRunNow =
+      nowParts.hour === TARGET_HOUR_BRT && nowParts.minute < 5;
+    const alreadyRanToday = lastRunDateKey === nowParts.dateKey;
 
-    if (accounts.length === 0) {
-      console.warn(
-        `[${cycleStartedAt}] Nenhuma conta valida encontrada para executar requests.`,
-      );
-    } else {
+    if (shouldRunNow && !alreadyRanToday) {
+      const cycleStartedAt = now.toISOString();
+      const accounts = loadAccounts();
+
+      if (accounts.length === 0) {
+        console.warn(
+          `[${cycleStartedAt}] Nenhuma conta valida encontrada para executar requests.`,
+        );
+      } else {
+        console.log(
+          `[${cycleStartedAt}] Executando ciclo em ${accounts.length} conta(s).`,
+        );
+        await runAllAccounts(accounts);
+      }
+
+      lastRunDateKey = nowParts.dateKey;
       console.log(
-        `[${cycleStartedAt}] Executando ciclo em ${accounts.length} conta(s).`,
+        `[${new Date().toISOString()}] Ciclo finalizado. Proxima execucao prevista: ${getNextRunDescription()}.`,
       );
-      await runAllAccounts(accounts);
     }
 
-    const nextRunAt = new Date(Date.now() + CYCLE_INTERVAL_MS).toISOString();
-    console.log(
-      `[${new Date().toISOString()}] Ciclo finalizado. Proxima execucao em ${nextRunAt}.`,
-    );
-
-    await wait(CYCLE_INTERVAL_MS);
+    await wait(SCHEDULER_TICK_MS);
   }
 }
 
